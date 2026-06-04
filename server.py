@@ -169,6 +169,35 @@ def get_sub(cur, user_id):
     row = cur.fetchone()
     return dict(row) if row else None
 
+def get_ad_images(db, ad_id):
+    cur = db.cursor()
+    cur.execute("SELECT data FROM ad_images WHERE ad_id=%s ORDER BY sort_order", (ad_id,))
+    images = [r["data"] for r in cur.fetchall()]
+    cur.close()
+    return images
+
+def serialize_ad_with_images(db, ad):
+    return {
+        "id": ad["id"],
+        "shopId": ad["shop_id"],
+        "title": ad["title"],
+        "price": ad["price"],
+        "desc": ad["description"],
+        "cat": ad["category"],
+        "createdAt": ad["created_at"],
+        "images": get_ad_images(db, ad["id"]),
+    }
+
+def serialize_ad(db, ad, include_images=True):
+    d = {
+        "id": ad["id"], "shopId": ad["shop_id"], "title": ad["title"],
+        "price": ad["price"], "desc": ad["description"],
+        "cat": ad["category"], "createdAt": ad["created_at"],
+    }
+    if include_images:
+        d["images"] = get_ad_images(db, ad["id"])
+    return d
+
 SUB_PLANS = {
     "basic":       {"label": "Basic",       "price": 15000,  "maxAds": 10,           "boost": 0, "maxImages": 5},
     "premium":     {"label": "Premium",      "price": 35000,  "maxAds": 30,           "boost": 1, "maxImages": 12},
@@ -188,19 +217,6 @@ def serialize_shop(s):
         "phone": s["phone"], "whatsapp": s["whatsapp"], "email": s["email"],
         "createdAt": s["created_at"],
     }
-
-def serialize_ad(cur, ad, include_images=True):
-    d = {
-        "id": ad["id"], "shopId": ad["shop_id"], "title": ad["title"],
-        "price": ad["price"], "desc": ad["description"],
-        "cat": ad["category"], "createdAt": ad["created_at"],
-    }
-    if include_images:
-        cur.execute(
-            "SELECT data FROM ad_images WHERE ad_id=%s ORDER BY sort_order", (ad["id"],)
-        )
-        d["images"] = [r["data"] for r in cur.fetchall()]
-    return d
 
 def serialize_msg(m):
     return {
@@ -438,47 +454,38 @@ def list_ads():
     q = (request.args.get("q") or "").strip().lower()
     sort = request.args.get("sort", "new")
 
-    cur.execute("""
-        SELECT a.* FROM ads a
-        JOIN shops s ON s.id = a.shop_id
-        ORDER BY a.created_at DESC
-    """)
-    rows = cur.fetchall()
-    result = [serialize_ad(cur, dict(r), include_images=True) for r in rows]
+    cur.execute("SELECT * FROM ads ORDER BY created_at DESC")
+    rows = [dict(r) for r in cur.fetchall()]
+    cur.close()
 
-    shop_boost = {}
-    for ad in result:
-        if ad["shopId"] not in shop_boost:
-            shop_boost[ad["shopId"]] = 0
+    result = [serialize_ad(db, r, include_images=True) for r in rows]
 
     if cat != "all":
         result = [a for a in result if a["cat"] == cat]
+
     if q:
         def matches(a):
-            cur.execute("SELECT name FROM shops WHERE id=%s", (a["shopId"],))
-            shop = cur.fetchone()
+            c = db.cursor()
+            c.execute("SELECT name FROM shops WHERE id=%s", (a["shopId"],))
+            shop = c.fetchone()
+            c.close()
             shop_name = shop["name"].lower() if shop else ""
             return q in a["title"].lower() or q in (a["desc"] or "").lower() or q in shop_name
         result = [a for a in result if matches(a)]
 
-    def sort_key(a):
-        boost = shop_boost.get(a["shopId"], 0)
-        if sort == "low": secondary = a["price"]
-        elif sort == "high": secondary = -a["price"]
-        else: secondary = 0
-        return (-boost, secondary)
-    if sort in ("low", "high"):
-        result.sort(key=sort_key)
-    else:
-        result.sort(key=lambda a: -shop_boost.get(a["shopId"], 0))
+    if sort == "low":
+        result.sort(key=lambda a: a["price"])
+    elif sort == "high":
+        result.sort(key=lambda a: -a["price"])
 
     if g.current_user:
-        cur.execute("SELECT ad_id FROM favourites WHERE user_id=%s", (g.current_user["id"],))
-        fav_ids = {r["ad_id"] for r in cur.fetchall()}
+        c = db.cursor()
+        c.execute("SELECT ad_id FROM favourites WHERE user_id=%s", (g.current_user["id"],))
+        fav_ids = {r["ad_id"] for r in c.fetchall()}
+        c.close()
         for a in result:
             a["faved"] = a["id"] in fav_ids
 
-    cur.close()
     return jsonify({"ads": result, "total": len(result)})
 
 @app.route("/api/ads/mine", methods=["GET"])
@@ -493,9 +500,9 @@ def my_ads():
         cur.close()
         return jsonify({"ads": []})
     cur.execute("SELECT * FROM ads WHERE shop_id=%s ORDER BY created_at DESC", (shop["id"],))
-    rows = cur.fetchall()
-    result = [serialize_ad(cur, dict(r)) for r in rows]
+    rows = [dict(r) for r in cur.fetchall()]
     cur.close()
+    result = [serialize_ad(db, r) for r in rows]
     return jsonify({"ads": result})
 
 @app.route("/api/ads", methods=["POST"])
@@ -543,8 +550,8 @@ def create_ad():
     db.commit()
     cur.execute("SELECT * FROM ads WHERE id=%s", (aid,))
     ad = dict(cur.fetchone())
-    result = serialize_ad(cur, ad)
     cur.close()
+    result = serialize_ad(db, ad)
     return jsonify({"ad": result}), 201
 
 @app.route("/api/ads/<aid>", methods=["DELETE"])
@@ -581,9 +588,9 @@ def list_favs():
         WHERE f.user_id=%s
         ORDER BY f.created_at DESC
     """, (uid,))
-    rows = cur.fetchall()
-    result = [serialize_ad(cur, dict(r)) for r in rows]
+    rows = [dict(r) for r in cur.fetchall()]
     cur.close()
+    result = [serialize_ad(db, r) for r in rows]
     return jsonify({"ads": result})
 
 @app.route("/api/favourites/<aid>", methods=["POST"])
@@ -637,23 +644,28 @@ def conversations():
         WHERE from_user=%s OR to_user=%s
     """, (uid, uid, uid))
     rows = cur.fetchall()
+    cur.close()
     convs = []
     for row in rows:
         other_id = row["other_id"]
-        cur.execute("SELECT * FROM users WHERE id=%s", (other_id,))
-        other = cur.fetchone()
-        if not other: continue
-        cur.execute("""
+        c = db.cursor()
+        c.execute("SELECT * FROM users WHERE id=%s", (other_id,))
+        other = c.fetchone()
+        if not other:
+            c.close()
+            continue
+        c.execute("""
             SELECT * FROM messages
             WHERE (from_user=%s AND to_user=%s) OR (from_user=%s AND to_user=%s)
             ORDER BY created_at DESC LIMIT 1
         """, (uid, other_id, other_id, uid))
-        last_msg = cur.fetchone()
-        cur.execute("""
+        last_msg = c.fetchone()
+        c.execute("""
             SELECT COUNT(*) as c FROM messages
             WHERE from_user=%s AND to_user=%s AND read=0
         """, (other_id, uid))
-        unread = cur.fetchone()["c"]
+        unread = c.fetchone()["c"]
+        c.close()
         convs.append({
             "otherId": other_id,
             "otherName": other["name"],
@@ -663,7 +675,6 @@ def conversations():
             "unread": unread,
         })
     convs.sort(key=lambda c: c["lastTs"], reverse=True)
-    cur.close()
     return jsonify({"conversations": convs})
 
 @app.route("/api/messages/<other_id>", methods=["GET"])
