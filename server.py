@@ -1,16 +1,18 @@
 """
 Arua MarketHub — Full Backend Server
-Flask + SQLite, JWT-style tokens via HMAC-SHA256, base64 image storage
+Flask + PostgreSQL, JWT-style tokens via HMAC-SHA256, base64 image storage
 """
 
-import sqlite3, hashlib, hmac, json, uuid, base64, os, time
+import hashlib, hmac, json, uuid, base64, os, time
 from datetime import datetime, timedelta
 from functools import wraps
+import psycopg2
+import psycopg2.extras
 from flask import Flask, request, jsonify, send_from_directory, g
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 SECRET = os.environ.get("AMH_SECRET", "arua-markethub-secret-2026-change-in-prod")
-DB_PATH = os.environ.get("DB_PATH", "/tmp/markethub.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "public")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
@@ -18,21 +20,21 @@ app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 # ── Database ──────────────────────────────────────────────────────────────────
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, check_same_thread=False)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA journal_mode=WAL")
-        g.db.execute("PRAGMA foreign_keys=ON")
+        g.db = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        g.db.autocommit = False
     return g.db
 
 @app.teardown_appcontext
 def close_db(e=None):
     db = g.pop("db", None)
-    if db: db.close()
+    if db:
+        try: db.close()
+        except: pass
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
-    db.executescript("""
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    cur = conn.cursor()
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -56,7 +58,7 @@ def init_db():
     );
     CREATE TABLE IF NOT EXISTS subscriptions (
         user_id TEXT PRIMARY KEY REFERENCES users(id),
-        plan TEXT NOT NULL CHECK(plan IN ('basic','premium','premiumplus')),
+        plan TEXT NOT NULL,
         expiry TEXT NOT NULL,
         txn_id TEXT,
         pay_method TEXT,
@@ -91,49 +93,10 @@ def init_db():
         created_at TEXT NOT NULL,
         PRIMARY KEY (user_id, ad_id)
     );
-    CREATE INDEX IF NOT EXISTS idx_ads_shop ON ads(shop_id);
-    CREATE INDEX IF NOT EXISTS idx_msgs_from ON messages(from_user);
-    CREATE INDEX IF NOT EXISTS idx_msgs_to ON messages(to_user);
-    CREATE INDEX IF NOT EXISTS idx_favs_user ON favourites(user_id);
     """)
-    db.commit()
-    if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
-        seed_demo(db)
-    db.close()
-
-def seed_demo(db):
-    now = utcnow()
-    expiry = (datetime.utcnow() + timedelta(days=30)).isoformat() + "Z"
-    u1, u2 = str(uuid.uuid4()), str(uuid.uuid4())
-    sh1, sh2 = str(uuid.uuid4()), str(uuid.uuid4())
-    db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)",
-               (u1, "Alex Seller", "alex@shop.com", hash_pw("1234"), "+256 700 123456", None, now))
-    db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)",
-               (u2, "Beatrice Nakato", "bea@market.com", hash_pw("1234"), "+256 701 654321", None, now))
-    db.execute("INSERT INTO shops VALUES (?,?,?,?,?,?,?,?,?,?)",
-               (sh1, u1, "Urban Collective", "Trendy accessories & clothing", "🏪",
-                "Arua City, Avenue Road, Shop 4A", "+256 700 123456",
-                "https://wa.me/256700123456", "alex@shop.com", now))
-    db.execute("INSERT INTO shops VALUES (?,?,?,?,?,?,?,?,?,?)",
-               (sh2, u2, "Tech Vault", "Gadgets & electronics", "🏪",
-                "Arua City, Weatherhead Park, Ground Floor", "+256 701 654321",
-                "https://wa.me/256701654321", "bea@market.com", now))
-    db.execute("INSERT INTO subscriptions VALUES (?,?,?,?,?,?)",
-               (u1, "premium", expiry, "DEMO-TXN-001", "mtn", now))
-    db.execute("INSERT INTO subscriptions VALUES (?,?,?,?,?,?)",
-               (u2, "premiumplus", expiry, "DEMO-TXN-002", "airtel", now))
-    demo_ads = [
-        (sh1, "Vintage Denim Jacket", 280000, "Classic blue, size M — great condition", "fashion", "2026-05-20T10:00:00Z"),
-        (sh1, "Leather Crossbody Bag", 195000, "Genuine leather, tan colour", "fashion", "2026-05-21T08:00:00Z"),
-        (sh2, "Wireless Earbuds Pro", 165000, "Active noise cancellation, 30hr battery", "electronics", "2026-05-21T12:00:00Z"),
-        (sh2, "Portable Power Bank", 98000, "20,000mAh fast charging", "electronics", "2026-05-22T06:00:00Z"),
-        (sh1, "Handmade Ceramic Mug", 65000, "Artisan crafted, 350ml", "art", "2026-05-19T09:00:00Z"),
-        (sh2, "Yoga Mat Premium", 125000, "Non-slip, 6mm thick, eco-friendly", "sports", "2026-05-18T15:00:00Z"),
-    ]
-    for shop_id, title, price, desc, cat, created in demo_ads:
-        aid = str(uuid.uuid4())
-        db.execute("INSERT INTO ads VALUES (?,?,?,?,?,?,?)", (aid, shop_id, title, price, desc, cat, created))
-    db.commit()
+    conn.commit()
+    cur.close()
+    conn.close()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def utcnow():
@@ -170,7 +133,10 @@ def require_auth(f):
         if not uid:
             return jsonify({"error": "Unauthorized"}), 401
         db = get_db()
-        user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        cur = db.cursor()
+        cur.execute("SELECT * FROM users WHERE id=%s", (uid,))
+        user = cur.fetchone()
+        cur.close()
         if not user:
             return jsonify({"error": "User not found"}), 401
         g.current_user = dict(user)
@@ -186,17 +152,21 @@ def optional_auth(f):
         g.current_user = None
         if uid:
             db = get_db()
-            user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            cur = db.cursor()
+            cur.execute("SELECT * FROM users WHERE id=%s", (uid,))
+            user = cur.fetchone()
+            cur.close()
             if user:
                 g.current_user = dict(user)
         return f(*args, **kwargs)
     return wrapper
 
-def get_sub(db, user_id):
-    row = db.execute(
-        "SELECT * FROM subscriptions WHERE user_id=? AND expiry > ?",
+def get_sub(cur, user_id):
+    cur.execute(
+        "SELECT * FROM subscriptions WHERE user_id=%s AND expiry > %s",
         (user_id, utcnow())
-    ).fetchone()
+    )
+    row = cur.fetchone()
     return dict(row) if row else None
 
 SUB_PLANS = {
@@ -219,17 +189,17 @@ def serialize_shop(s):
         "createdAt": s["created_at"],
     }
 
-def serialize_ad(db, ad, include_images=True):
+def serialize_ad(cur, ad, include_images=True):
     d = {
         "id": ad["id"], "shopId": ad["shop_id"], "title": ad["title"],
         "price": ad["price"], "desc": ad["description"],
         "cat": ad["category"], "createdAt": ad["created_at"],
     }
     if include_images:
-        imgs = db.execute(
-            "SELECT data FROM ad_images WHERE ad_id=? ORDER BY sort_order", (ad["id"],)
-        ).fetchall()
-        d["images"] = [r["data"] for r in imgs]
+        cur.execute(
+            "SELECT data FROM ad_images WHERE ad_id=%s ORDER BY sort_order", (ad["id"],)
+        )
+        d["images"] = [r["data"] for r in cur.fetchall()]
     return d
 
 def serialize_msg(m):
@@ -263,13 +233,18 @@ def signup():
     if not email or "@" not in email: return jsonify({"error": "Valid email required"}), 400
     if len(password) < 6: return jsonify({"error": "Password must be at least 6 characters"}), 400
     db = get_db()
-    if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+    cur = db.cursor()
+    cur.execute("SELECT 1 FROM users WHERE email=%s", (email,))
+    if cur.fetchone():
+        cur.close()
         return jsonify({"error": "Email already registered"}), 409
     uid = str(uuid.uuid4())
-    db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)",
-               (uid, name, email, hash_pw(password), phone, None, utcnow()))
+    cur.execute("INSERT INTO users VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (uid, name, email, hash_pw(password), phone, None, utcnow()))
     db.commit()
-    user = dict(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+    cur.execute("SELECT * FROM users WHERE id=%s", (uid,))
+    user = dict(cur.fetchone())
+    cur.close()
     return jsonify({"token": make_token(uid), "user": serialize_user(user, include_private=True)}), 201
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -278,7 +253,10 @@ def login():
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
     db = get_db()
-    user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM users WHERE email=%s", (email,))
+    user = cur.fetchone()
+    cur.close()
     if not user or user["password_hash"] != hash_pw(password):
         return jsonify({"error": "Incorrect email or password"}), 401
     return jsonify({"token": make_token(user["id"]), "user": serialize_user(dict(user), include_private=True)})
@@ -292,7 +270,10 @@ def me():
 @app.route("/api/users/<uid>", methods=["GET"])
 def get_user(uid):
     db = get_db()
-    user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM users WHERE id=%s", (uid,))
+    user = cur.fetchone()
+    cur.close()
     if not user: return jsonify({"error": "Not found"}), 404
     return jsonify(serialize_user(dict(user)))
 
@@ -301,6 +282,7 @@ def get_user(uid):
 def update_profile():
     data = request.get_json(force=True) or {}
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
@@ -308,34 +290,46 @@ def update_profile():
     avatar = data.get("avatar")
     if not name: return jsonify({"error": "Name required"}), 400
     if not email or "@" not in email: return jsonify({"error": "Valid email required"}), 400
-    if db.execute("SELECT 1 FROM users WHERE email=? AND id!=?", (email, uid)).fetchone():
+    cur.execute("SELECT 1 FROM users WHERE email=%s AND id!=%s", (email, uid))
+    if cur.fetchone():
+        cur.close()
         return jsonify({"error": "Email already used by another account"}), 409
     if avatar is not None:
-        db.execute("UPDATE users SET name=?,email=?,phone=?,avatar=? WHERE id=?",
-                   (name, email, phone, avatar, uid))
+        cur.execute("UPDATE users SET name=%s,email=%s,phone=%s,avatar=%s WHERE id=%s",
+                    (name, email, phone, avatar, uid))
     else:
-        db.execute("UPDATE users SET name=?,email=?,phone=? WHERE id=?",
-                   (name, email, phone, uid))
+        cur.execute("UPDATE users SET name=%s,email=%s,phone=%s WHERE id=%s",
+                    (name, email, phone, uid))
     db.commit()
-    user = dict(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+    cur.execute("SELECT * FROM users WHERE id=%s", (uid,))
+    user = dict(cur.fetchone())
+    cur.close()
     return jsonify({"user": serialize_user(user, include_private=True)})
 
 # ── Shops ─────────────────────────────────────────────────────────────────────
 @app.route("/api/shops", methods=["GET"])
 def list_shops():
     db = get_db()
-    shops = db.execute("SELECT * FROM shops ORDER BY name").fetchall()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM shops ORDER BY name")
+    shops = cur.fetchall()
+    cur.close()
     return jsonify([serialize_shop(dict(s)) for s in shops])
 
 @app.route("/api/shops/mine", methods=["GET"])
 @require_auth
 def my_shop():
     db = get_db()
-    shop = db.execute("SELECT * FROM shops WHERE owner_id=?", (g.current_user["id"],)).fetchone()
-    if not shop: return jsonify({"shop": None})
-    sub = get_sub(db, g.current_user["id"])
+    cur = db.cursor()
+    cur.execute("SELECT * FROM shops WHERE owner_id=%s", (g.current_user["id"],))
+    shop = cur.fetchone()
+    if not shop:
+        cur.close()
+        return jsonify({"shop": None})
+    sub = get_sub(cur, g.current_user["id"])
     result = serialize_shop(dict(shop))
-    result["subscription"] = dict(sub) if sub else None
+    result["subscription"] = sub
+    cur.close()
     return jsonify({"shop": result})
 
 @app.route("/api/shops", methods=["POST"])
@@ -343,8 +337,11 @@ def my_shop():
 def create_shop():
     data = request.get_json(force=True) or {}
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    if db.execute("SELECT 1 FROM shops WHERE owner_id=?", (uid,)).fetchone():
+    cur.execute("SELECT 1 FROM shops WHERE owner_id=%s", (uid,))
+    if cur.fetchone():
+        cur.close()
         return jsonify({"error": "You already have a shop. Use PUT to update it."}), 409
     name = (data.get("name") or "").strip()
     location = (data.get("location") or "").strip()
@@ -356,11 +353,13 @@ def create_shop():
     if not phone and not whatsapp and not email:
         return jsonify({"error": "At least one contact method required"}), 400
     sid = str(uuid.uuid4())
-    db.execute("INSERT INTO shops VALUES (?,?,?,?,?,?,?,?,?,?)",
-               (sid, uid, name, (data.get("desc") or "").strip(), "🏪",
-                location, phone, whatsapp, email, utcnow()))
+    cur.execute("INSERT INTO shops VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (sid, uid, name, (data.get("desc") or "").strip(), "🏪",
+                 location, phone, whatsapp, email, utcnow()))
     db.commit()
-    shop = dict(db.execute("SELECT * FROM shops WHERE id=?", (sid,)).fetchone())
+    cur.execute("SELECT * FROM shops WHERE id=%s", (sid,))
+    shop = dict(cur.fetchone())
+    cur.close()
     return jsonify({"shop": serialize_shop(shop)}), 201
 
 @app.route("/api/shops/mine", methods=["PUT"])
@@ -368,9 +367,13 @@ def create_shop():
 def update_shop():
     data = request.get_json(force=True) or {}
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    shop = db.execute("SELECT * FROM shops WHERE owner_id=?", (uid,)).fetchone()
-    if not shop: return jsonify({"error": "No shop found"}), 404
+    cur.execute("SELECT * FROM shops WHERE owner_id=%s", (uid,))
+    shop = cur.fetchone()
+    if not shop:
+        cur.close()
+        return jsonify({"error": "No shop found"}), 404
     name = (data.get("name") or "").strip()
     location = (data.get("location") or "").strip()
     if not name: return jsonify({"error": "Shop name required"}), 400
@@ -380,11 +383,13 @@ def update_shop():
     email = (data.get("email") or "").strip()
     if not phone and not whatsapp and not email:
         return jsonify({"error": "At least one contact method required"}), 400
-    db.execute("""UPDATE shops SET name=?,description=?,location=?,phone=?,whatsapp=?,email=?
-                  WHERE owner_id=?""",
-               (name, (data.get("desc") or "").strip(), location, phone, whatsapp, email, uid))
+    cur.execute("""UPDATE shops SET name=%s,description=%s,location=%s,phone=%s,whatsapp=%s,email=%s
+                   WHERE owner_id=%s""",
+                (name, (data.get("desc") or "").strip(), location, phone, whatsapp, email, uid))
     db.commit()
-    shop = dict(db.execute("SELECT * FROM shops WHERE owner_id=?", (uid,)).fetchone())
+    cur.execute("SELECT * FROM shops WHERE owner_id=%s", (uid,))
+    shop = dict(cur.fetchone())
+    cur.close()
     return jsonify({"shop": serialize_shop(shop)})
 
 # ── Subscriptions ─────────────────────────────────────────────────────────────
@@ -392,8 +397,10 @@ def update_shop():
 @require_auth
 def my_sub():
     db = get_db()
-    sub = get_sub(db, g.current_user["id"])
-    return jsonify({"subscription": dict(sub) if sub else None})
+    cur = db.cursor()
+    sub = get_sub(cur, g.current_user["id"])
+    cur.close()
+    return jsonify({"subscription": sub})
 
 @app.route("/api/subscriptions", methods=["POST"])
 @require_auth
@@ -405,17 +412,20 @@ def activate_sub():
     if plan not in SUB_PLANS: return jsonify({"error": "Invalid plan"}), 400
     if not txn_id or len(txn_id) < 5: return jsonify({"error": "Invalid transaction ID"}), 400
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
     expiry = (datetime.utcnow() + timedelta(days=30)).isoformat() + "Z"
-    db.execute("""INSERT INTO subscriptions(user_id,plan,expiry,txn_id,pay_method,created_at)
-                  VALUES(?,?,?,?,?,?)
-                  ON CONFLICT(user_id) DO UPDATE SET
-                  plan=excluded.plan, expiry=excluded.expiry,
-                  txn_id=excluded.txn_id, pay_method=excluded.pay_method,
-                  created_at=excluded.created_at""",
-               (uid, plan, expiry, txn_id, pay_method, utcnow()))
+    cur.execute("""INSERT INTO subscriptions(user_id,plan,expiry,txn_id,pay_method,created_at)
+                   VALUES(%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                   plan=EXCLUDED.plan, expiry=EXCLUDED.expiry,
+                   txn_id=EXCLUDED.txn_id, pay_method=EXCLUDED.pay_method,
+                   created_at=EXCLUDED.created_at""",
+                (uid, plan, expiry, txn_id, pay_method, utcnow()))
     db.commit()
-    sub = dict(db.execute("SELECT * FROM subscriptions WHERE user_id=?", (uid,)).fetchone())
+    cur.execute("SELECT * FROM subscriptions WHERE user_id=%s", (uid,))
+    sub = dict(cur.fetchone())
+    cur.close()
     return jsonify({"subscription": sub, "message": f"✅ Subscribed to {SUB_PLANS[plan]['label']}! Active for 30 days."})
 
 # ── Ads ───────────────────────────────────────────────────────────────────────
@@ -423,17 +433,18 @@ def activate_sub():
 @optional_auth
 def list_ads():
     db = get_db()
+    cur = db.cursor()
     cat = request.args.get("cat", "all")
     q = (request.args.get("q") or "").strip().lower()
     sort = request.args.get("sort", "new")
 
-    rows = db.execute("""
+    cur.execute("""
         SELECT a.* FROM ads a
         JOIN shops s ON s.id = a.shop_id
         ORDER BY a.created_at DESC
-    """).fetchall()
-
-    result = [serialize_ad(db, dict(r), include_images=True) for r in rows]
+    """)
+    rows = cur.fetchall()
+    result = [serialize_ad(cur, dict(r), include_images=True) for r in rows]
 
     shop_boost = {}
     for ad in result:
@@ -444,7 +455,8 @@ def list_ads():
         result = [a for a in result if a["cat"] == cat]
     if q:
         def matches(a):
-            shop = db.execute("SELECT name FROM shops WHERE id=?", (a["shopId"],)).fetchone()
+            cur.execute("SELECT name FROM shops WHERE id=%s", (a["shopId"],))
+            shop = cur.fetchone()
             shop_name = shop["name"].lower() if shop else ""
             return q in a["title"].lower() or q in (a["desc"] or "").lower() or q in shop_name
         result = [a for a in result if matches(a)]
@@ -461,68 +473,99 @@ def list_ads():
         result.sort(key=lambda a: -shop_boost.get(a["shopId"], 0))
 
     if g.current_user:
-        fav_ids = {r["ad_id"] for r in db.execute(
-            "SELECT ad_id FROM favourites WHERE user_id=?", (g.current_user["id"],)).fetchall()}
+        cur.execute("SELECT ad_id FROM favourites WHERE user_id=%s", (g.current_user["id"],))
+        fav_ids = {r["ad_id"] for r in cur.fetchall()}
         for a in result:
             a["faved"] = a["id"] in fav_ids
 
+    cur.close()
     return jsonify({"ads": result, "total": len(result)})
 
 @app.route("/api/ads/mine", methods=["GET"])
 @require_auth
 def my_ads():
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    shop = db.execute("SELECT id FROM shops WHERE owner_id=?", (uid,)).fetchone()
-    if not shop: return jsonify({"ads": []})
-    rows = db.execute("SELECT * FROM ads WHERE shop_id=? ORDER BY created_at DESC", (shop["id"],)).fetchall()
-    return jsonify({"ads": [serialize_ad(db, dict(r)) for r in rows]})
+    cur.execute("SELECT id FROM shops WHERE owner_id=%s", (uid,))
+    shop = cur.fetchone()
+    if not shop:
+        cur.close()
+        return jsonify({"ads": []})
+    cur.execute("SELECT * FROM ads WHERE shop_id=%s ORDER BY created_at DESC", (shop["id"],))
+    rows = cur.fetchall()
+    result = [serialize_ad(cur, dict(r)) for r in rows]
+    cur.close()
+    return jsonify({"ads": result})
 
 @app.route("/api/ads", methods=["POST"])
 @require_auth
 def create_ad():
     data = request.get_json(force=True) or {}
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    sub = get_sub(db, uid)
-    if not sub: return jsonify({"error": "Active subscription required to post ads"}), 403
-    shop = db.execute("SELECT * FROM shops WHERE owner_id=?", (uid,)).fetchone()
-    if not shop: return jsonify({"error": "Create a shop first"}), 403
+    sub = get_sub(cur, uid)
+    if not sub:
+        cur.close()
+        return jsonify({"error": "Active subscription required to post ads"}), 403
+    cur.execute("SELECT * FROM shops WHERE owner_id=%s", (uid,))
+    shop = cur.fetchone()
+    if not shop:
+        cur.close()
+        return jsonify({"error": "Create a shop first"}), 403
     plan_info = SUB_PLANS[sub["plan"]]
-    ad_count = db.execute("SELECT COUNT(*) as c FROM ads WHERE shop_id=?", (shop["id"],)).fetchone()["c"]
+    cur.execute("SELECT COUNT(*) as c FROM ads WHERE shop_id=%s", (shop["id"],))
+    ad_count = cur.fetchone()["c"]
     if plan_info["maxAds"] != float("inf") and ad_count >= plan_info["maxAds"]:
+        cur.close()
         return jsonify({"error": f"Ad limit reached for your {plan_info['label']} plan"}), 403
     title = (data.get("title") or "").strip()
-    if not title: return jsonify({"error": "Title required"}), 400
+    if not title:
+        cur.close()
+        return jsonify({"error": "Title required"}), 400
     price = data.get("price")
-    if price is None or float(price) <= 0: return jsonify({"error": "Valid price required"}), 400
+    if price is None or float(price) <= 0:
+        cur.close()
+        return jsonify({"error": "Valid price required"}), 400
     images = data.get("images") or []
     max_imgs = plan_info["maxImages"]
     if max_imgs != float("inf"):
         images = images[:int(max_imgs)]
     aid = str(uuid.uuid4())
-    db.execute("INSERT INTO ads VALUES (?,?,?,?,?,?,?)",
-               (aid, shop["id"], title, float(price),
-                (data.get("desc") or "").strip(),
-                data.get("cat") or "other", utcnow()))
+    cur.execute("INSERT INTO ads VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (aid, shop["id"], title, float(price),
+                 (data.get("desc") or "").strip(),
+                 data.get("cat") or "other", utcnow()))
     for i, img_data in enumerate(images):
-        db.execute("INSERT INTO ad_images VALUES (?,?,?,?)",
-                   (str(uuid.uuid4()), aid, img_data, i))
+        cur.execute("INSERT INTO ad_images VALUES (%s,%s,%s,%s)",
+                    (str(uuid.uuid4()), aid, img_data, i))
     db.commit()
-    ad = dict(db.execute("SELECT * FROM ads WHERE id=?", (aid,)).fetchone())
-    return jsonify({"ad": serialize_ad(db, ad)}), 201
+    cur.execute("SELECT * FROM ads WHERE id=%s", (aid,))
+    ad = dict(cur.fetchone())
+    result = serialize_ad(cur, ad)
+    cur.close()
+    return jsonify({"ad": result}), 201
 
 @app.route("/api/ads/<aid>", methods=["DELETE"])
 @require_auth
 def delete_ad(aid):
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    shop = db.execute("SELECT id FROM shops WHERE owner_id=?", (uid,)).fetchone()
-    if not shop: return jsonify({"error": "Not found"}), 404
-    ad = db.execute("SELECT * FROM ads WHERE id=? AND shop_id=?", (aid, shop["id"])).fetchone()
-    if not ad: return jsonify({"error": "Ad not found or not yours"}), 404
-    db.execute("DELETE FROM ads WHERE id=?", (aid,))
+    cur.execute("SELECT id FROM shops WHERE owner_id=%s", (uid,))
+    shop = cur.fetchone()
+    if not shop:
+        cur.close()
+        return jsonify({"error": "Not found"}), 404
+    cur.execute("SELECT * FROM ads WHERE id=%s AND shop_id=%s", (aid, shop["id"]))
+    ad = cur.fetchone()
+    if not ad:
+        cur.close()
+        return jsonify({"error": "Ad not found or not yours"}), 404
+    cur.execute("DELETE FROM ads WHERE id=%s", (aid,))
     db.commit()
+    cur.close()
     return jsonify({"ok": True})
 
 # ── Favourites ────────────────────────────────────────────────────────────────
@@ -530,67 +573,87 @@ def delete_ad(aid):
 @require_auth
 def list_favs():
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    rows = db.execute("""
+    cur.execute("""
         SELECT a.* FROM ads a
         JOIN favourites f ON f.ad_id = a.id
-        WHERE f.user_id=?
+        WHERE f.user_id=%s
         ORDER BY f.created_at DESC
-    """, (uid,)).fetchall()
-    return jsonify({"ads": [serialize_ad(db, dict(r)) for r in rows]})
+    """, (uid,))
+    rows = cur.fetchall()
+    result = [serialize_ad(cur, dict(r)) for r in rows]
+    cur.close()
+    return jsonify({"ads": result})
 
 @app.route("/api/favourites/<aid>", methods=["POST"])
 @require_auth
 def add_fav(aid):
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    if not db.execute("SELECT 1 FROM ads WHERE id=?", (aid,)).fetchone():
+    cur.execute("SELECT 1 FROM ads WHERE id=%s", (aid,))
+    if not cur.fetchone():
+        cur.close()
         return jsonify({"error": "Ad not found"}), 404
-    db.execute("INSERT OR IGNORE INTO favourites VALUES (?,?,?)", (uid, aid, utcnow()))
+    cur.execute("INSERT INTO favourites VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                (uid, aid, utcnow()))
     db.commit()
+    cur.close()
     return jsonify({"ok": True})
 
 @app.route("/api/favourites/<aid>", methods=["DELETE"])
 @require_auth
 def remove_fav(aid):
     db = get_db()
-    db.execute("DELETE FROM favourites WHERE user_id=? AND ad_id=?", (g.current_user["id"], aid))
+    cur = db.cursor()
+    cur.execute("DELETE FROM favourites WHERE user_id=%s AND ad_id=%s",
+                (g.current_user["id"], aid))
     db.commit()
+    cur.close()
     return jsonify({"ok": True})
 
 @app.route("/api/favourites/ids", methods=["GET"])
 @require_auth
 def fav_ids():
     db = get_db()
-    rows = db.execute("SELECT ad_id FROM favourites WHERE user_id=?", (g.current_user["id"],)).fetchall()
-    return jsonify({"ids": [r["ad_id"] for r in rows]})
+    cur = db.cursor()
+    cur.execute("SELECT ad_id FROM favourites WHERE user_id=%s", (g.current_user["id"],))
+    ids = [r["ad_id"] for r in cur.fetchall()]
+    cur.close()
+    return jsonify({"ids": ids})
 
 # ── Messages ──────────────────────────────────────────────────────────────────
 @app.route("/api/messages/conversations", methods=["GET"])
 @require_auth
 def conversations():
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    rows = db.execute("""
+    cur.execute("""
         SELECT DISTINCT
-            CASE WHEN from_user=? THEN to_user ELSE from_user END AS other_id
+            CASE WHEN from_user=%s THEN to_user ELSE from_user END AS other_id
         FROM messages
-        WHERE from_user=? OR to_user=?
-    """, (uid, uid, uid)).fetchall()
+        WHERE from_user=%s OR to_user=%s
+    """, (uid, uid, uid))
+    rows = cur.fetchall()
     convs = []
     for row in rows:
         other_id = row["other_id"]
-        other = db.execute("SELECT * FROM users WHERE id=?", (other_id,)).fetchone()
+        cur.execute("SELECT * FROM users WHERE id=%s", (other_id,))
+        other = cur.fetchone()
         if not other: continue
-        last_msg = db.execute("""
+        cur.execute("""
             SELECT * FROM messages
-            WHERE (from_user=? AND to_user=?) OR (from_user=? AND to_user=?)
+            WHERE (from_user=%s AND to_user=%s) OR (from_user=%s AND to_user=%s)
             ORDER BY created_at DESC LIMIT 1
-        """, (uid, other_id, other_id, uid)).fetchone()
-        unread = db.execute("""
+        """, (uid, other_id, other_id, uid))
+        last_msg = cur.fetchone()
+        cur.execute("""
             SELECT COUNT(*) as c FROM messages
-            WHERE from_user=? AND to_user=? AND read=0
-        """, (other_id, uid)).fetchone()["c"]
+            WHERE from_user=%s AND to_user=%s AND read=0
+        """, (other_id, uid))
+        unread = cur.fetchone()["c"]
         convs.append({
             "otherId": other_id,
             "otherName": other["name"],
@@ -600,23 +663,27 @@ def conversations():
             "unread": unread,
         })
     convs.sort(key=lambda c: c["lastTs"], reverse=True)
+    cur.close()
     return jsonify({"conversations": convs})
 
 @app.route("/api/messages/<other_id>", methods=["GET"])
 @require_auth
 def get_messages(other_id):
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    msgs = db.execute("""
+    cur.execute("""
         SELECT * FROM messages
-        WHERE (from_user=? AND to_user=?) OR (from_user=? AND to_user=?)
+        WHERE (from_user=%s AND to_user=%s) OR (from_user=%s AND to_user=%s)
         ORDER BY created_at ASC
-    """, (uid, other_id, other_id, uid)).fetchall()
-    db.execute("""
+    """, (uid, other_id, other_id, uid))
+    msgs = cur.fetchall()
+    cur.execute("""
         UPDATE messages SET read=1
-        WHERE from_user=? AND to_user=? AND read=0
+        WHERE from_user=%s AND to_user=%s AND read=0
     """, (other_id, uid))
     db.commit()
+    cur.close()
     return jsonify({"messages": [serialize_msg(dict(m)) for m in msgs]})
 
 @app.route("/api/messages/<other_id>", methods=["POST"])
@@ -626,24 +693,32 @@ def send_message(other_id):
     text = (data.get("text") or "").strip()
     if not text: return jsonify({"error": "Message text required"}), 400
     db = get_db()
+    cur = db.cursor()
     uid = g.current_user["id"]
-    if not db.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
+    cur.execute("SELECT 1 FROM users WHERE id=%s", (other_id,))
+    if not cur.fetchone():
+        cur.close()
         return jsonify({"error": "Recipient not found"}), 404
     mid = str(uuid.uuid4())
-    db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)",
-               (mid, uid, other_id, text, 0, utcnow()))
+    cur.execute("INSERT INTO messages VALUES (%s,%s,%s,%s,%s,%s)",
+                (mid, uid, other_id, text, 0, utcnow()))
     db.commit()
-    msg = dict(db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
+    cur.execute("SELECT * FROM messages WHERE id=%s", (mid,))
+    msg = dict(cur.fetchone())
+    cur.close()
     return jsonify({"message": serialize_msg(msg)}), 201
 
 @app.route("/api/messages/unread-count", methods=["GET"])
 @require_auth
 def unread_count():
     db = get_db()
-    count = db.execute(
-        "SELECT COUNT(*) as c FROM messages WHERE to_user=? AND read=0",
+    cur = db.cursor()
+    cur.execute(
+        "SELECT COUNT(*) as c FROM messages WHERE to_user=%s AND read=0",
         (g.current_user["id"],)
-    ).fetchone()["c"]
+    )
+    count = cur.fetchone()["c"]
+    cur.close()
     return jsonify({"count": count})
 
 # ── Serve frontend ────────────────────────────────────────────────────────────
