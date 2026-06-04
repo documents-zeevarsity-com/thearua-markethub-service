@@ -35,15 +35,12 @@ const apiDelete = (path)         => apiFetch(path, { method: "DELETE" });
 
 /* ══════════════════════════════════════════════════════════════════════════
    OVERRIDE THE APP'S DATA LAYER
-   We replace the original load(), save(), and all the key functions so
-   the app talks to the server instead of localStorage.
 ══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Bootstrap ─────────────────────────────────────────────────────────── */
 window._apiReady = false;
 
 async function apiBootstrap() {
-  // Restore session
   const token = getToken();
   if (token) {
     try {
@@ -55,20 +52,17 @@ async function apiBootstrap() {
     }
   }
 
-  // Load ads + shops + favs in parallel
   await refreshAllData();
   window._apiReady = true;
   updateUI();
   setPanel("browse");
 
-  // Poll for unread messages every 5 seconds
   setInterval(async () => {
     if (currentUser) {
       try {
         const d = await apiGet("/messages/unread-count");
         _updateChatBadgeDirect(d.count);
       } catch(e) {}
-      // If chat panel is open, refresh messages
       if (currentConvWith && document.getElementById("panelChats").style.display !== "none") {
         await _refreshCurrentChat();
       }
@@ -77,19 +71,16 @@ async function apiBootstrap() {
 }
 
 async function refreshAllData() {
-  // Fetch ads (includes images)
   try {
     const d = await apiGet("/ads");
     ads = d.ads || [];
   } catch(e) { ads = []; }
 
-  // Fetch shops
   try {
     const d = await apiGet("/shops");
     shops = d.shops || [];
   } catch(e) { shops = []; }
 
-  // Fetch favourites ids
   if (currentUser) {
     try {
       const d = await apiGet("/favourites/ids");
@@ -97,12 +88,10 @@ async function refreshAllData() {
     } catch(e) {}
   }
 
-  // Fetch subscriptions info (own shop + sub)
   if (currentUser) {
     try {
       const d = await apiGet("/shops/mine");
       if (d.shop) {
-        // Merge into shops array
         const idx = shops.findIndex(s => s.ownerId === currentUser.id);
         const normalized = _normalizeShop(d.shop);
         if (idx > -1) shops[idx] = normalized;
@@ -117,7 +106,6 @@ async function refreshAllData() {
   }
 }
 
-/* Normalize shop from API (snake_case → camelCase already done in server) */
 function _normalizeShop(s) {
   return {
     id: s.id, ownerId: s.ownerId, name: s.name, desc: s.desc || s.description || "",
@@ -127,12 +115,8 @@ function _normalizeShop(s) {
 }
 
 /* ── Replace load() and save() ─────────────────────────────────────────── */
-window.load = function() {
-  // No-op: data comes from API in apiBootstrap()
-};
-window.save = function() {
-  // No-op: mutations happen via API calls directly
-};
+window.load = function() {};
+window.save = function() {};
 
 /* ── Auth ──────────────────────────────────────────────────────────────── */
 window.submitAuth = async function(e) {
@@ -235,7 +219,6 @@ window.submitShop = async function(e) {
     let data;
     if (ex) {
       data = await apiPut("/shops/mine", body);
-      // Update local
       const idx = shops.findIndex(s => s.id === ex.id);
       if (idx > -1) shops[idx] = _normalizeShop(data.shop);
       else shops.push(_normalizeShop(data.shop));
@@ -243,7 +226,6 @@ window.submitShop = async function(e) {
       toast("Shop details saved! ✅");
       if (document.getElementById("panelMyShop").style.display !== "none") renderMyShop();
     } else {
-      // New shop: collect & show payment modal
       pendingShopData = body;
       closeShopModal();
       openPayModal();
@@ -265,7 +247,6 @@ window.confirmPayment = async function() {
   if (txn.length < 5)   { statusEl.className="pay-status error"; statusEl.textContent="Transaction ID looks too short."; return; }
 
   try {
-    // First create the shop if it's pending
     if (pendingShopData) {
       const sd = await apiPost("/shops", pendingShopData);
       const normalized = _normalizeShop(sd.shop);
@@ -273,7 +254,6 @@ window.confirmPayment = async function() {
       pendingShopData = null;
     }
 
-    // Then activate subscription
     const data = await apiPost("/subscriptions", {
       plan: activeRegPlan, txnId: txn, payMethod: activePayMethod
     });
@@ -384,7 +364,6 @@ window.toggleFav = async function(adId, ev) {
   const set = userFavs();
   const wasFaved = set.has(adId);
 
-  // Optimistic update
   if (wasFaved) { set.delete(adId); toast("Removed from favourites."); }
   else { set.add(adId); toast("❤️ Saved to favourites!"); }
   updateFavBadge();
@@ -401,7 +380,6 @@ window.toggleFav = async function(adId, ev) {
     if (wasFaved) await apiDelete(`/favourites/${adId}`);
     else await apiPost(`/favourites/${adId}`, {});
   } catch(err) {
-    // Rollback on error
     if (wasFaved) set.add(adId); else set.delete(adId);
     updateFavBadge();
     toast("Could not update favourite.");
@@ -409,7 +387,6 @@ window.toggleFav = async function(adId, ev) {
 };
 
 /* ── Chat / Messages ───────────────────────────────────────────────────── */
-// Cache of messages per conversation
 const _msgCache = {};
 
 window.renderChatsPanel = async function() {
@@ -452,20 +429,16 @@ window.renderChatsPanel = async function() {
 
 window.openConversation = async function(otherId, displayName) {
   currentConvWith = otherId;
-  const other = users.find(u => u.id === otherId);
-  const name = displayName || (other ? other.name : "User");
+  const name = displayName || otherId;
+  const other = { id: otherId, name: name, avatar: null };
 
   const head = document.getElementById("chatPaneHead");
   head.style.display = "flex";
 
   const paneAv = document.getElementById("chatPaneAvatar");
-  if (other && other.avatar) {
-    paneAv.innerHTML = `<img src="${other.avatar}" style="width:100%;height:100%;object-fit:cover;" alt="">`;
-    paneAv.style.background = "none";
-  } else {
-    paneAv.textContent = initials(name);
-    paneAv.style.background = "";
-  }
+  paneAv.textContent = initials(name);
+  paneAv.style.background = "";
+
   document.getElementById("chatPaneName").textContent = name;
   document.getElementById("chatFoot").style.display = "flex";
   document.getElementById("chatInput").focus();
@@ -473,7 +446,7 @@ window.openConversation = async function(otherId, displayName) {
 
   await _refreshCurrentChat();
   renderChatsPanel();
-  _updateChatBadgeDirect(0); // Will be corrected by poll
+  _updateChatBadgeDirect(0);
 };
 
 async function _refreshCurrentChat() {
@@ -493,8 +466,7 @@ function _renderMessages(msgs) {
   if (!msgs.length) { ph.style.display = "flex"; body.querySelectorAll(".msg-wrap,.chat-date-sep").forEach(m => m.remove()); return; }
   ph.style.display = "none";
 
-  // Try to find other user in users array or use cached
-  const other = users.find(u => u.id === currentConvWith);
+  const other = { id: currentConvWith, name: currentConvWith, avatar: null };
 
   let html = "", lastDate = "";
   msgs.forEach(m => {
@@ -566,8 +538,7 @@ window.startChat = function(ownerId, shopName, adTitle) {
   openConversation(ownerId, shopName);
 };
 
-/* ── Patch setPanel to work async ───────────────────────────────────────── */
-const _origSetPanel = window.setPanel;
+/* ── setPanel ───────────────────────────────────────────────────────────── */
 window.setPanel = function(p) {
   ["panelBrowse","panelFavs","panelChats","panelMyShop","panelPost"].forEach(id => document.getElementById(id).style.display = "none");
   ["tabBrowse","tabFavs","tabChats","tabMyShop","tabPost"].forEach(id => { const el = document.getElementById(id); if(el) el.classList.remove("active"); });
@@ -602,11 +573,9 @@ window.setPanel = function(p) {
   closeMobileMenu();
 };
 
-/* ── Override window.onload ─────────────────────────────────────────────── */
+/* ── window.onload ──────────────────────────────────────────────────────── */
 window.onload = async function() {
-  // Show loading state
   const grid = document.getElementById("adsGrid");
   if (grid) grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><i class="fas fa-spinner fa-spin" style="font-size:2rem;color:var(--gold);margin-bottom:10px;display:block;"></i><p>Loading marketplace…</p></div>`;
-
   await apiBootstrap();
 };
