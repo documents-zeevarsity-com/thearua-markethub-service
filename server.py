@@ -475,26 +475,19 @@ def list_ads():
     sort = request.args.get("sort", "new")
 
     # Only show ads from shops with active subscriptions
-    rows = db.execute("""
+rows = db.execute("""
         SELECT a.* FROM ads a
         JOIN shops s ON s.id = a.shop_id
-        JOIN subscriptions sub ON sub.user_id = s.owner_id AND sub.expiry > ?
         ORDER BY a.created_at DESC
-    """, (utcnow(),)).fetchall()
+    """, ()).fetchall()
 
     result = [serialize_ad(db, dict(r), include_images=True) for r in rows]
 
     # Attach boost level for sorting
-    shop_boost = {}
+   shop_boost = {}
     for ad in result:
         if ad["shopId"] not in shop_boost:
-            shop = db.execute("SELECT owner_id FROM shops WHERE id=?", (ad["shopId"],)).fetchone()
-            if shop:
-                sub = get_sub(db, shop["owner_id"])
-                boost = SUB_PLANS.get(sub["plan"], {}).get("boost", 0) if sub else 0
-                shop_boost[ad["shopId"]] = boost
-            else:
-                shop_boost[ad["shopId"]] = 0
+            shop_boost[ad["shopId"]] = 0
 
     # Filter
     if cat != "all":
