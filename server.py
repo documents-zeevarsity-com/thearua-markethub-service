@@ -10,7 +10,7 @@ from flask import Flask, request, jsonify, send_from_directory, g
 
 # ── Config ──────────────────────────────────────────────────────────────────
 SECRET = os.environ.get("AMH_SECRET", "arua-markethub-secret-2026-change-in-prod")
-DB_PATH = os.path.join(os.path.dirname(__file__), "markethub.db")
+DB_PATH = os.environ.get("DB_PATH", "/tmp/markethub.db")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "public")
 MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB per image
 
