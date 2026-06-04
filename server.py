@@ -746,8 +746,11 @@ def static_files(path):
         return send_from_directory(STATIC_DIR, "index.html")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+os.makedirs(STATIC_DIR, exist_ok=True)
+init_db()
+
 if __name__ == "__main__":
-    os.makedirs(STATIC_DIR, exist_ok=True)
-    init_db()
+    print("🚀 Arua MarketHub backend running on http://localhost:5000")
+    app.run(host="0.0.0.0", port=5000, debug=False)
     print("🚀 Arua MarketHub backend running on http://localhost:5000")
     app.run(host="0.0.0.0", port=5000, debug=False)
