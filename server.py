@@ -3,7 +3,7 @@ Arua MarketHub — Full Backend Server
 Flask + SQLite, JWT-style tokens via HMAC-SHA256, base64 image storage
 """
 
-import sqlite3, hashlib, hmac, json, uuid, base64, os, time, re
+import sqlite3, hashlib, hmac, json, uuid, base64, os, time
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, send_from_directory, g
@@ -12,11 +12,10 @@ from flask import Flask, request, jsonify, send_from_directory, g
 SECRET = os.environ.get("AMH_SECRET", "arua-markethub-secret-2026-change-in-prod")
 DB_PATH = os.environ.get("DB_PATH", "/tmp/markethub.db")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "public")
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB per image
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="")
 
-# ── Database ─────────────────────────────────────────────────────────────────
+# ── Database ──────────────────────────────────────────────────────────────────
 def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -43,7 +42,6 @@ def init_db():
         avatar TEXT DEFAULT NULL,
         created_at TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS shops (
         id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL REFERENCES users(id),
@@ -56,7 +54,6 @@ def init_db():
         email TEXT DEFAULT '',
         created_at TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS subscriptions (
         user_id TEXT PRIMARY KEY REFERENCES users(id),
         plan TEXT NOT NULL CHECK(plan IN ('basic','premium','premiumplus')),
@@ -65,7 +62,6 @@ def init_db():
         pay_method TEXT,
         created_at TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS ads (
         id TEXT PRIMARY KEY,
         shop_id TEXT NOT NULL REFERENCES shops(id),
@@ -75,14 +71,12 @@ def init_db():
         category TEXT DEFAULT 'other',
         created_at TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS ad_images (
         id TEXT PRIMARY KEY,
         ad_id TEXT NOT NULL REFERENCES ads(id) ON DELETE CASCADE,
         data TEXT NOT NULL,
         sort_order INTEGER DEFAULT 0
     );
-
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         from_user TEXT NOT NULL REFERENCES users(id),
@@ -91,22 +85,18 @@ def init_db():
         read INTEGER DEFAULT 0,
         created_at TEXT NOT NULL
     );
-
     CREATE TABLE IF NOT EXISTS favourites (
         user_id TEXT NOT NULL REFERENCES users(id),
         ad_id TEXT NOT NULL REFERENCES ads(id) ON DELETE CASCADE,
         created_at TEXT NOT NULL,
         PRIMARY KEY (user_id, ad_id)
     );
-
     CREATE INDEX IF NOT EXISTS idx_ads_shop ON ads(shop_id);
     CREATE INDEX IF NOT EXISTS idx_msgs_from ON messages(from_user);
     CREATE INDEX IF NOT EXISTS idx_msgs_to ON messages(to_user);
     CREATE INDEX IF NOT EXISTS idx_favs_user ON favourites(user_id);
     """)
     db.commit()
-
-    # Seed demo data if empty
     if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
         seed_demo(db)
     db.close()
@@ -114,15 +104,12 @@ def init_db():
 def seed_demo(db):
     now = utcnow()
     expiry = (datetime.utcnow() + timedelta(days=30)).isoformat() + "Z"
-
     u1, u2 = str(uuid.uuid4()), str(uuid.uuid4())
     sh1, sh2 = str(uuid.uuid4()), str(uuid.uuid4())
-
     db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)",
                (u1, "Alex Seller", "alex@shop.com", hash_pw("1234"), "+256 700 123456", None, now))
     db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)",
                (u2, "Beatrice Nakato", "bea@market.com", hash_pw("1234"), "+256 701 654321", None, now))
-
     db.execute("INSERT INTO shops VALUES (?,?,?,?,?,?,?,?,?,?)",
                (sh1, u1, "Urban Collective", "Trendy accessories & clothing", "🏪",
                 "Arua City, Avenue Road, Shop 4A", "+256 700 123456",
@@ -131,12 +118,10 @@ def seed_demo(db):
                (sh2, u2, "Tech Vault", "Gadgets & electronics", "🏪",
                 "Arua City, Weatherhead Park, Ground Floor", "+256 701 654321",
                 "https://wa.me/256701654321", "bea@market.com", now))
-
     db.execute("INSERT INTO subscriptions VALUES (?,?,?,?,?,?)",
                (u1, "premium", expiry, "DEMO-TXN-001", "mtn", now))
     db.execute("INSERT INTO subscriptions VALUES (?,?,?,?,?,?)",
                (u2, "premiumplus", expiry, "DEMO-TXN-002", "airtel", now))
-
     demo_ads = [
         (sh1, "Vintage Denim Jacket", 280000, "Classic blue, size M — great condition", "fashion", "2026-05-20T10:00:00Z"),
         (sh1, "Leather Crossbody Bag", 195000, "Genuine leather, tan colour", "fashion", "2026-05-21T08:00:00Z"),
@@ -148,10 +133,9 @@ def seed_demo(db):
     for shop_id, title, price, desc, cat, created in demo_ads:
         aid = str(uuid.uuid4())
         db.execute("INSERT INTO ads VALUES (?,?,?,?,?,?,?)", (aid, shop_id, title, price, desc, cat, created))
-
     db.commit()
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def utcnow():
     return datetime.utcnow().isoformat() + "Z"
 
@@ -159,7 +143,7 @@ def hash_pw(password):
     return hashlib.sha256((password + SECRET).encode()).hexdigest()
 
 def make_token(user_id):
-    payload = json.dumps({"uid": user_id, "exp": time.time() + 60 * 60 * 24 * 30})  # 30 days
+    payload = json.dumps({"uid": user_id, "exp": time.time() + 60 * 60 * 24 * 30})
     b64 = base64.urlsafe_b64encode(payload.encode()).decode()
     sig = hmac.new(SECRET.encode(), b64.encode(), hashlib.sha256).hexdigest()
     return f"{b64}.{sig}"
@@ -216,9 +200,9 @@ def get_sub(db, user_id):
     return dict(row) if row else None
 
 SUB_PLANS = {
-    "basic":       {"label": "Basic",        "price": 15000,  "maxAds": 10,          "boost": 0, "maxImages": 5},
-    "premium":     {"label": "Premium",       "price": 35000,  "maxAds": 30,          "boost": 1, "maxImages": 12},
-    "premiumplus": {"label": "Premium Plus",  "price": 105000, "maxAds": float("inf"),"boost": 2, "maxImages": float("inf")},
+    "basic":       {"label": "Basic",       "price": 15000,  "maxAds": 10,           "boost": 0, "maxImages": 5},
+    "premium":     {"label": "Premium",      "price": 35000,  "maxAds": 30,           "boost": 1, "maxImages": 12},
+    "premiumplus": {"label": "Premium Plus", "price": 105000, "maxAds": float("inf"), "boost": 2, "maxImages": float("inf")},
 }
 
 def serialize_user(u, include_private=False):
@@ -254,7 +238,7 @@ def serialize_msg(m):
         "text": m["text"], "read": bool(m["read"]), "ts": m["created_at"],
     }
 
-# ── CORS (manual, since flask-cors is unavailable) ───────────────────────────
+# ── CORS ──────────────────────────────────────────────────────────────────────
 @app.after_request
 def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -275,37 +259,29 @@ def signup():
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
     phone = (data.get("phone") or "").strip()
-
-    if not name:    return jsonify({"error": "Name is required"}), 400
+    if not name: return jsonify({"error": "Name is required"}), 400
     if not email or "@" not in email: return jsonify({"error": "Valid email required"}), 400
     if len(password) < 6: return jsonify({"error": "Password must be at least 6 characters"}), 400
-
     db = get_db()
     if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
         return jsonify({"error": "Email already registered"}), 409
-
     uid = str(uuid.uuid4())
     db.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)",
                (uid, name, email, hash_pw(password), phone, None, utcnow()))
     db.commit()
-
     user = dict(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
-    token = make_token(uid)
-    return jsonify({"token": token, "user": serialize_user(user, include_private=True)}), 201
+    return jsonify({"token": make_token(uid), "user": serialize_user(user, include_private=True)}), 201
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     data = request.get_json(force=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
-
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     if not user or user["password_hash"] != hash_pw(password):
         return jsonify({"error": "Incorrect email or password"}), 401
-
-    token = make_token(user["id"])
-    return jsonify({"token": token, "user": serialize_user(dict(user), include_private=True)})
+    return jsonify({"token": make_token(user["id"]), "user": serialize_user(dict(user), include_private=True)})
 
 @app.route("/api/auth/me", methods=["GET"])
 @require_auth
@@ -326,18 +302,14 @@ def update_profile():
     data = request.get_json(force=True) or {}
     db = get_db()
     uid = g.current_user["id"]
-
     name = (data.get("name") or "").strip()
     email = (data.get("email") or "").strip().lower()
     phone = (data.get("phone") or "").strip()
-    avatar = data.get("avatar")  # base64 string or None
-
+    avatar = data.get("avatar")
     if not name: return jsonify({"error": "Name required"}), 400
     if not email or "@" not in email: return jsonify({"error": "Valid email required"}), 400
-
-    conflict = db.execute("SELECT 1 FROM users WHERE email=? AND id!=?", (email, uid)).fetchone()
-    if conflict: return jsonify({"error": "Email already used by another account"}), 409
-
+    if db.execute("SELECT 1 FROM users WHERE email=? AND id!=?", (email, uid)).fetchone():
+        return jsonify({"error": "Email already used by another account"}), 409
     if avatar is not None:
         db.execute("UPDATE users SET name=?,email=?,phone=?,avatar=? WHERE id=?",
                    (name, email, phone, avatar, uid))
@@ -345,7 +317,6 @@ def update_profile():
         db.execute("UPDATE users SET name=?,email=?,phone=? WHERE id=?",
                    (name, email, phone, uid))
     db.commit()
-
     user = dict(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
     return jsonify({"user": serialize_user(user, include_private=True)})
 
@@ -373,27 +344,22 @@ def create_shop():
     data = request.get_json(force=True) or {}
     db = get_db()
     uid = g.current_user["id"]
-
     if db.execute("SELECT 1 FROM shops WHERE owner_id=?", (uid,)).fetchone():
         return jsonify({"error": "You already have a shop. Use PUT to update it."}), 409
-
     name = (data.get("name") or "").strip()
     location = (data.get("location") or "").strip()
     if not name: return jsonify({"error": "Shop name required"}), 400
     if not location: return jsonify({"error": "Location required"}), 400
-
     phone = (data.get("phone") or "").strip()
     whatsapp = (data.get("whatsapp") or "").strip()
     email = (data.get("email") or "").strip()
     if not phone and not whatsapp and not email:
         return jsonify({"error": "At least one contact method required"}), 400
-
     sid = str(uuid.uuid4())
     db.execute("INSERT INTO shops VALUES (?,?,?,?,?,?,?,?,?,?)",
                (sid, uid, name, (data.get("desc") or "").strip(), "🏪",
                 location, phone, whatsapp, email, utcnow()))
     db.commit()
-
     shop = dict(db.execute("SELECT * FROM shops WHERE id=?", (sid,)).fetchone())
     return jsonify({"shop": serialize_shop(shop)}), 201
 
@@ -405,23 +371,19 @@ def update_shop():
     uid = g.current_user["id"]
     shop = db.execute("SELECT * FROM shops WHERE owner_id=?", (uid,)).fetchone()
     if not shop: return jsonify({"error": "No shop found"}), 404
-
     name = (data.get("name") or "").strip()
     location = (data.get("location") or "").strip()
     if not name: return jsonify({"error": "Shop name required"}), 400
     if not location: return jsonify({"error": "Location required"}), 400
-
     phone = (data.get("phone") or "").strip()
     whatsapp = (data.get("whatsapp") or "").strip()
     email = (data.get("email") or "").strip()
     if not phone and not whatsapp and not email:
         return jsonify({"error": "At least one contact method required"}), 400
-
     db.execute("""UPDATE shops SET name=?,description=?,location=?,phone=?,whatsapp=?,email=?
                   WHERE owner_id=?""",
                (name, (data.get("desc") or "").strip(), location, phone, whatsapp, email, uid))
     db.commit()
-
     shop = dict(db.execute("SELECT * FROM shops WHERE owner_id=?", (uid,)).fetchone())
     return jsonify({"shop": serialize_shop(shop)})
 
@@ -440,15 +402,11 @@ def activate_sub():
     plan = data.get("plan")
     txn_id = (data.get("txnId") or "").strip()
     pay_method = data.get("payMethod")
-
     if plan not in SUB_PLANS: return jsonify({"error": "Invalid plan"}), 400
-    if not txn_id or len(txn_id) < 5:
-        return jsonify({"error": "Invalid transaction ID"}), 400
-
+    if not txn_id or len(txn_id) < 5: return jsonify({"error": "Invalid transaction ID"}), 400
     db = get_db()
     uid = g.current_user["id"]
     expiry = (datetime.utcnow() + timedelta(days=30)).isoformat() + "Z"
-
     db.execute("""INSERT INTO subscriptions(user_id,plan,expiry,txn_id,pay_method,created_at)
                   VALUES(?,?,?,?,?,?)
                   ON CONFLICT(user_id) DO UPDATE SET
@@ -457,13 +415,8 @@ def activate_sub():
                   created_at=excluded.created_at""",
                (uid, plan, expiry, txn_id, pay_method, utcnow()))
     db.commit()
-
     sub = dict(db.execute("SELECT * FROM subscriptions WHERE user_id=?", (uid,)).fetchone())
-    plan_info = SUB_PLANS[plan]
-    return jsonify({
-        "subscription": sub,
-        "message": f"✅ Subscribed to {plan_info['label']}! Active for 30 days."
-    })
+    return jsonify({"subscription": sub, "message": f"✅ Subscribed to {SUB_PLANS[plan]['label']}! Active for 30 days."})
 
 # ── Ads ───────────────────────────────────────────────────────────────────────
 @app.route("/api/ads", methods=["GET"])
@@ -474,22 +427,19 @@ def list_ads():
     q = (request.args.get("q") or "").strip().lower()
     sort = request.args.get("sort", "new")
 
-    # Only show ads from shops with active subscriptions
-rows = db.execute("""
+    rows = db.execute("""
         SELECT a.* FROM ads a
         JOIN shops s ON s.id = a.shop_id
         ORDER BY a.created_at DESC
-    """, ()).fetchall()
+    """).fetchall()
 
     result = [serialize_ad(db, dict(r), include_images=True) for r in rows]
 
-    # Attach boost level for sorting
-   shop_boost = {}
+    shop_boost = {}
     for ad in result:
         if ad["shopId"] not in shop_boost:
             shop_boost[ad["shopId"]] = 0
 
-    # Filter
     if cat != "all":
         result = [a for a in result if a["cat"] == cat]
     if q:
@@ -499,20 +449,17 @@ rows = db.execute("""
             return q in a["title"].lower() or q in (a["desc"] or "").lower() or q in shop_name
         result = [a for a in result if matches(a)]
 
-    # Sort: boost first, then by sort param
     def sort_key(a):
         boost = shop_boost.get(a["shopId"], 0)
-        if sort == "low":  secondary = a["price"]
+        if sort == "low": secondary = a["price"]
         elif sort == "high": secondary = -a["price"]
-        else: secondary = 0  # new: already sorted by created_at desc
+        else: secondary = 0
         return (-boost, secondary)
     if sort in ("low", "high"):
         result.sort(key=sort_key)
     else:
-        # For "new", just stable-sort by boost (already newest first from SQL)
         result.sort(key=lambda a: -shop_boost.get(a["shopId"], 0))
 
-    # Add favourited flag if user is logged in
     if g.current_user:
         fav_ids = {r["ad_id"] for r in db.execute(
             "SELECT ad_id FROM favourites WHERE user_id=?", (g.current_user["id"],)).fetchall()}
@@ -528,7 +475,6 @@ def my_ads():
     uid = g.current_user["id"]
     shop = db.execute("SELECT id FROM shops WHERE owner_id=?", (uid,)).fetchone()
     if not shop: return jsonify({"ads": []})
-
     rows = db.execute("SELECT * FROM ads WHERE shop_id=? ORDER BY created_at DESC", (shop["id"],)).fetchall()
     return jsonify({"ads": [serialize_ad(db, dict(r)) for r in rows]})
 
@@ -538,40 +484,30 @@ def create_ad():
     data = request.get_json(force=True) or {}
     db = get_db()
     uid = g.current_user["id"]
-
-    # Must have active sub
     sub = get_sub(db, uid)
     if not sub: return jsonify({"error": "Active subscription required to post ads"}), 403
-
     shop = db.execute("SELECT * FROM shops WHERE owner_id=?", (uid,)).fetchone()
     if not shop: return jsonify({"error": "Create a shop first"}), 403
-
-    # Check ad quota
     plan_info = SUB_PLANS[sub["plan"]]
     ad_count = db.execute("SELECT COUNT(*) as c FROM ads WHERE shop_id=?", (shop["id"],)).fetchone()["c"]
     if plan_info["maxAds"] != float("inf") and ad_count >= plan_info["maxAds"]:
         return jsonify({"error": f"Ad limit reached for your {plan_info['label']} plan"}), 403
-
     title = (data.get("title") or "").strip()
     if not title: return jsonify({"error": "Title required"}), 400
     price = data.get("price")
     if price is None or float(price) <= 0: return jsonify({"error": "Valid price required"}), 400
-
     images = data.get("images") or []
     max_imgs = plan_info["maxImages"]
     if max_imgs != float("inf"):
         images = images[:int(max_imgs)]
-
     aid = str(uuid.uuid4())
     db.execute("INSERT INTO ads VALUES (?,?,?,?,?,?,?)",
                (aid, shop["id"], title, float(price),
                 (data.get("desc") or "").strip(),
                 data.get("cat") or "other", utcnow()))
-
     for i, img_data in enumerate(images):
         db.execute("INSERT INTO ad_images VALUES (?,?,?,?)",
                    (str(uuid.uuid4()), aid, img_data, i))
-
     db.commit()
     ad = dict(db.execute("SELECT * FROM ads WHERE id=?", (aid,)).fetchone())
     return jsonify({"ad": serialize_ad(db, ad)}), 201
@@ -635,32 +571,26 @@ def fav_ids():
 def conversations():
     db = get_db()
     uid = g.current_user["id"]
-
-    # Get all unique conversation partners
     rows = db.execute("""
         SELECT DISTINCT
             CASE WHEN from_user=? THEN to_user ELSE from_user END AS other_id
         FROM messages
         WHERE from_user=? OR to_user=?
     """, (uid, uid, uid)).fetchall()
-
     convs = []
     for row in rows:
         other_id = row["other_id"]
         other = db.execute("SELECT * FROM users WHERE id=?", (other_id,)).fetchone()
         if not other: continue
-
         last_msg = db.execute("""
             SELECT * FROM messages
             WHERE (from_user=? AND to_user=?) OR (from_user=? AND to_user=?)
             ORDER BY created_at DESC LIMIT 1
         """, (uid, other_id, other_id, uid)).fetchone()
-
         unread = db.execute("""
             SELECT COUNT(*) as c FROM messages
             WHERE from_user=? AND to_user=? AND read=0
         """, (other_id, uid)).fetchone()["c"]
-
         convs.append({
             "otherId": other_id,
             "otherName": other["name"],
@@ -669,8 +599,6 @@ def conversations():
             "lastTs": last_msg["created_at"] if last_msg else "",
             "unread": unread,
         })
-
-    # Sort by last message time
     convs.sort(key=lambda c: c["lastTs"], reverse=True)
     return jsonify({"conversations": convs})
 
@@ -679,20 +607,16 @@ def conversations():
 def get_messages(other_id):
     db = get_db()
     uid = g.current_user["id"]
-
     msgs = db.execute("""
         SELECT * FROM messages
         WHERE (from_user=? AND to_user=?) OR (from_user=? AND to_user=?)
         ORDER BY created_at ASC
     """, (uid, other_id, other_id, uid)).fetchall()
-
-    # Mark received messages as read
     db.execute("""
         UPDATE messages SET read=1
         WHERE from_user=? AND to_user=? AND read=0
     """, (other_id, uid))
     db.commit()
-
     return jsonify({"messages": [serialize_msg(dict(m)) for m in msgs]})
 
 @app.route("/api/messages/<other_id>", methods=["POST"])
@@ -701,18 +625,14 @@ def send_message(other_id):
     data = request.get_json(force=True) or {}
     text = (data.get("text") or "").strip()
     if not text: return jsonify({"error": "Message text required"}), 400
-
     db = get_db()
     uid = g.current_user["id"]
-
     if not db.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
         return jsonify({"error": "Recipient not found"}), 404
-
     mid = str(uuid.uuid4())
     db.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)",
                (mid, uid, other_id, text, 0, utcnow()))
     db.commit()
-
     msg = dict(db.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
     return jsonify({"message": serialize_msg(msg)}), 201
 
@@ -743,7 +663,5 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 init_db()
 
 if __name__ == "__main__":
-    print("🚀 Arua MarketHub backend running on http://localhost:5000")
-    app.run(host="0.0.0.0", port=5000, debug=False)
     print("🚀 Arua MarketHub backend running on http://localhost:5000")
     app.run(host="0.0.0.0", port=5000, debug=False)
